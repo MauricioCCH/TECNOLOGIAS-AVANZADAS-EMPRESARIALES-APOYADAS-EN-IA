@@ -1,5 +1,5 @@
 import { Fragment, useState, useEffect } from 'react';
-import { load, save, uid, pdfText, importFiles, callLLM, buildPrompt, parseJSON, normalize, exportXlsx } from './lib.js';
+import { load, save, uid, pdfText, importFiles, callLLM, buildPrompt, parseJSON, normalize, exportXlsx, exportGroupXlsx } from './lib.js';
 
 const RUB0 = [
   ['Estructura', 'Introducción, desarrollo y conclusión claros y bien organizados.'],
@@ -8,8 +8,8 @@ const RUB0 = [
   ['Redacción', 'Redacción clara, coherente y con vocabulario adecuado.'],
   ['Síntesis', 'Condensa la información esencial sin copiar literalmente.'],
 ];
-const newTask = (asignatura, titulo) => ({
-  id: uid(), asignatura, titulo, descripcion: '', objetivos: '', instrucciones: '', base: '', works: [],
+const newTask = (asignatura, titulo, modalidad) => ({
+  id: uid(), asignatura, titulo, modalidad, descripcion: '', objetivos: '', instrucciones: '', base: '', works: [],
   rubric: RUB0.map(([nombre, descripcion]) => ({ id: uid(), nombre, descripcion, puntos: 5 })),
 });
 const ESTADO = { pendiente: 'Pendiente', evaluando: 'Evaluando…', evaluado: 'Evaluado', error: 'Con error' };
@@ -19,7 +19,7 @@ export default function Evaluator({ me, subjects, cfg, view, go }) {
   const key = 'tasks_' + me.id;
   const [tasks, setTasks] = useState(() => load(key, []));
   const [cur, setCur] = useState(null);
-  const [nt, setNt] = useState({ asignatura: '', titulo: '' });
+  const [nt, setNt] = useState({ asignatura: '', titulo: '', modalidad: 'individual' });
   const [filtro, setFiltro] = useState('');
   useEffect(() => {
     save(key, tasks.map((t) => ({ ...t, works: t.works.map((w) => ({ ...w, estado: w.estado === 'evaluando' ? 'pendiente' : w.estado, texto: (w.texto || '').slice(0, 20000) })) })));
@@ -29,8 +29,8 @@ export default function Evaluator({ me, subjects, cfg, view, go }) {
   const updW = (id, wid, p) => setTasks((ts) => ts.map((t) => (t.id === id ? { ...t, works: t.works.map((w) => (w.id === wid ? { ...w, ...p } : w)) } : t)));
   const create = (e) => {
     e.preventDefault();
-    const t = newTask(nt.asignatura || filtro, nt.titulo.trim());
-    setTasks([t, ...tasks]); setNt({ asignatura: '', titulo: '' }); setCur(t.id);
+    const t = newTask(nt.asignatura || filtro, nt.titulo.trim(), nt.modalidad);
+    setTasks([t, ...tasks]); setNt({ asignatura: '', titulo: '', modalidad: 'individual' }); setCur(t.id);
   };
   if (view === 'misasig') return (
     <div className="stack">
@@ -53,7 +53,7 @@ export default function Evaluator({ me, subjects, cfg, view, go }) {
   );
   const t = tasks.find((x) => x.id === cur);
   const shown = filtro ? tasks.filter((x) => x.asignatura === filtro) : tasks;
-  if (t) return <Tarea t={t} upd={(p) => upd(t.id, p)} updW={(wid, p) => updW(t.id, wid, p)} cfg={cfg} back={() => setCur(null)} />;
+  if (t) return <Tarea t={t} asignaturas={mine} upd={(p) => upd(t.id, p)} updW={(wid, p) => updW(t.id, wid, p)} cfg={cfg} back={() => setCur(null)} />;
 
   return (
     <div className="stack">
@@ -66,6 +66,12 @@ export default function Evaluator({ me, subjects, cfg, view, go }) {
           <label>Asignatura
             <select required value={nt.asignatura || filtro} onChange={(e) => setNt({ ...nt, asignatura: e.target.value })}>
               <option value="">Selecciona…</option>{mine.map((s) => <option key={s.id}>{s.nombre}</option>)}
+            </select>
+          </label>
+          <label>Modalidad de la tarea
+            <select value={nt.modalidad} onChange={(e) => setNt({ ...nt, modalidad: e.target.value })}>
+              <option value="individual">Individual</option>
+              <option value="grupal">Grupal</option>
             </select>
           </label>
           <label className="grow">Título de la nueva tarea<input required value={nt.titulo} onChange={(e) => setNt({ ...nt, titulo: e.target.value })} /></label>
@@ -96,7 +102,7 @@ export default function Evaluator({ me, subjects, cfg, view, go }) {
   );
 }
 
-function Tarea({ t, upd, updW, cfg, back }) {
+function Tarea({ t, asignaturas, upd, updW, cfg, back }) {
   const [step, setStep] = useState(1);
   const [sel, setSel] = useState({});
   const [open, setOpen] = useState(null);
@@ -139,6 +145,30 @@ function Tarea({ t, upd, updW, cfg, back }) {
     for (const w of list) await run(w);
     setBusy(false);
   };
+  const removeWork = (w) => {
+    const estudiante = w.estudiante ?? w.res?.estudiante ?? w.estudianteMoodle ?? w.archivo;
+    if (!confirm(`¿Eliminar el trabajo de "${estudiante}" y su evaluación?`)) return;
+    upd({ works: works.filter((item) => item.id !== w.id) });
+    setSel((current) => {
+      const next = { ...current };
+      delete next[w.id];
+      return next;
+    });
+    if (open === w.id) setOpen(null);
+  };
+  const exportResults = () => {
+    try {
+      if (t.modalidad === 'grupal') {
+        exportGroupXlsx(works, t);
+        setMsg('Se descargó un Excel con una fila individual por integrante.');
+      } else {
+        exportXlsx(works, t);
+        setMsg('Se descargó el archivo Excel.');
+      }
+    } catch (e) {
+      setMsg(`No se pudo exportar: ${e.message}`);
+    }
+  };
   const chosen = works.filter((w) => sel[w.id]);
   const done = works.filter((w) => w.res);
 
@@ -146,7 +176,7 @@ function Tarea({ t, upd, updW, cfg, back }) {
     <div className="stack">
       <div className="head">
         <button className="btn ghost" onClick={back}>← Volver a mis tareas</button>
-        <h1>{t.titulo}</h1><span className="tag">{t.asignatura}</span>
+        <h1>{t.titulo}</h1><span className="tag">{t.asignatura} · {t.modalidad === 'grupal' ? 'Grupal' : 'Individual'}</span>
       </div>
       <div className="tabs">
         {['Contexto', 'Rúbrica', 'Trabajos y resultados'].map((l, i) => <button key={l} className={step === i + 1 ? 'on' : ''} onClick={() => setStep(i + 1)}>{i + 1}. {l}</button>)}
@@ -154,6 +184,20 @@ function Tarea({ t, upd, updW, cfg, back }) {
 
       {step === 1 && (
         <div className="panel stack">
+          <div className="grid2">
+            <label>Asignatura
+              <select value={t.asignatura} onChange={(e) => upd({ asignatura: e.target.value })}>
+                {!asignaturas.some((s) => s.nombre === t.asignatura) && <option value={t.asignatura}>{t.asignatura}</option>}
+                {asignaturas.map((s) => <option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+              </select>
+            </label>
+            <label>Modalidad de la tarea
+              <select value={t.modalidad || 'individual'} onChange={(e) => upd({ modalidad: e.target.value })}>
+                <option value="individual">Individual</option>
+                <option value="grupal">Grupal</option>
+              </select>
+            </label>
+          </div>
           <label>Título de la tarea<input value={t.titulo} onChange={(e) => upd({ titulo: e.target.value })} /></label>
           <label>Descripción de la tarea<textarea rows={2} value={t.descripcion} onChange={(e) => upd({ descripcion: e.target.value })} /></label>
           <div className="grid2">
@@ -193,18 +237,19 @@ function Tarea({ t, upd, updW, cfg, back }) {
             <h3>Trabajos importados</h3>
             <label className="btn primary">Importar PDF o ZIP de Moodle<input type="file" accept=".pdf,.zip" multiple hidden onChange={imp} disabled={busy} /></label>
           </div>
-          {msg && <p className="muted" role="status">{msg}</p>}
+          {msg && <p className={msg.startsWith('No se pudo') ? 'error' : 'muted'} role="status">{msg}</p>}
+          {t.modalidad === 'grupal' && <p className="muted">Para incluir una fila por integrante con la nota del equipo, separa los nombres del grupo con punto y coma (;) en la columna Estudiante.</p>}
           {works.length === 0 ? <p className="muted">Aún no hay trabajos. Importa el ZIP descargado de Moodle o varios PDF a la vez.</p> : (
             <>
               <div className="row">
                 <button className="btn" disabled={busy || !chosen.length} onClick={() => runMany(chosen)}>Evaluar seleccionados ({chosen.length})</button>
                 <button className="btn primary" disabled={busy} onClick={() => runMany(works)}>Evaluar todos ({works.length})</button>
-                <button className="btn" disabled={!done.length} onClick={() => exportXlsx(works, t)}>Exportar a Excel</button>
+                <button className="btn" disabled={!done.length} onClick={exportResults}>{t.modalidad === 'grupal' ? 'Exportar Excel por integrante' : 'Exportar a Excel'}</button>
                 <button className="btn ghost" disabled={busy} onClick={() => { upd({ works: [] }); setSel({}); }}>Vaciar lista</button>
               </div>
               <div className="scroll"><table>
                 <thead><tr><th><input type="checkbox" aria-label="Seleccionar todos" checked={chosen.length === works.length} onChange={(e) => setSel(e.target.checked ? Object.fromEntries(works.map((w) => [w.id, true])) : {})} /></th>
-                  <th>Estudiante</th><th>Título</th><th>Archivo</th><th>Estado</th><th>Nota</th><th></th></tr></thead>
+                  <th>Estudiante</th><th>Título</th><th>Archivo</th><th>Estado</th><th>Nota</th><th>Acciones</th></tr></thead>
                 <tbody>{works.map((w) => (
                   <Fragment key={w.id}>
                     <tr>
@@ -217,6 +262,7 @@ function Tarea({ t, upd, updW, cfg, back }) {
                       <td className="r">
                         <button className="btn" disabled={busy} onClick={async () => { setBusy(true); await run(w); setBusy(false); }}>{w.res ? 'Reevaluar' : 'Evaluar'}</button>
                         {(w.res || w.error) && <button className="btn ghost" onClick={() => setOpen(open === w.id ? null : w.id)}>{open === w.id ? 'Ocultar' : 'Detalle'}</button>}
+                        <button className="btn danger" disabled={busy} aria-label={`Eliminar trabajo de ${w.estudiante ?? w.res?.estudiante ?? w.estudianteMoodle ?? w.archivo}`} onClick={() => removeWork(w)}>Eliminar</button>
                       </td>
                     </tr>
                     {open === w.id && (

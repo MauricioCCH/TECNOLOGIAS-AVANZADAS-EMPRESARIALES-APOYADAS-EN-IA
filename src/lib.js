@@ -217,7 +217,8 @@ export async function callLLM(cfg, prompt) {
 }
 
 export function buildPrompt(ctx, rubric, w) {
-  return `Eres un docente evaluador experto. Evalúa el trabajo de un estudiante usando ÚNICAMENTE la rúbrica indicada.
+  const grupal = ctx.modalidad === "grupal";
+  return `Eres un docente evaluador experto. Evalúa el trabajo ${grupal ? "de un equipo de estudiantes" : "de un estudiante"} usando ÚNICAMENTE la rúbrica indicada.
 
 ## CONTEXTO ACADÉMICO
 Tarea: ${ctx.titulo} - ${ctx.descripcion}
@@ -232,7 +233,7 @@ ${rubric.map((c, i) => `${i + 1}. ${c.nombre} (máximo ${c.puntos} pts): ${c.des
 
 ## TRABAJO DEL ESTUDIANTE
 Archivo: ${w.archivo}
-Estudiante según Moodle (puede estar vacío): ${w.estudianteMoodle || "desconocido"}
+Estudiante(s) indicado(s) en la lista o según Moodle: ${w.estudiante || w.estudianteMoodle || "desconocido"}
 Contenido:
 """
 ${w.texto.slice(0, 20000)}
@@ -240,6 +241,7 @@ ${w.texto.slice(0, 20000)}
 
 ## INSTRUCCIONES
 - Identifica autor(es) y título del trabajo a partir del contenido y del nombre del archivo.
+${grupal ? "- Incluye todos los integrantes en el campo estudiante, separados únicamente por punto y coma (;). Si ya hay nombres indicados en la lista, consérvalos." : ""}
 - Para cada criterio asigna un puntaje entre 0 y su máximo (se permiten decimales) con una justificación breve.
 - Compara con el texto base para valorar comprensión y fidelidad.
 - Escribe una retroalimentación general en español, constructiva: fortalezas y aspectos a mejorar.
@@ -303,5 +305,44 @@ export function exportXlsx(works, ctx) {
   XLSX.writeFile(
     wb,
     `calificaciones_${(ctx.titulo || "tarea").replace(/[^\w-]+/g, "_")}.xlsx`,
+  );
+}
+
+export function exportGroupXlsx(works, ctx) {
+  const rows = [];
+  for (const w of works.filter((item) => item.res)) {
+    const raw = w.estudiante || w.res.estudiante || w.estudianteMoodle || "";
+    const names = raw
+      .split(/[;\r\n]+/)
+      .map((name) => name.trim())
+      .filter((name) => name && !/^(?:no identificado|desconocido)$/i.test(name));
+    if (!names.length) {
+      throw new Error(`Indica los integrantes del trabajo "${w.archivo}" separados por punto y coma.`);
+    }
+    const members = [...new Set(names)];
+    for (const name of members) {
+      const row = {
+        Estudiante: name,
+        "Integrantes del grupo": members.join("; "),
+        "Título del trabajo": w.titulo || w.res.titulo,
+        Archivo: w.archivo,
+      };
+      w.res.criterios.forEach((c) => {
+        row[`${c.nombre} (/${c.max})`] = c.puntaje;
+      });
+      row.Total = w.res.total;
+      row["Total máximo"] = w.res.max;
+      row.Retroalimentación = w.res.retroalimentacion;
+      rows.push(row);
+    }
+  }
+
+  if (!rows.length) throw new Error("No hay trabajos evaluados para exportar.");
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), "Calificaciones");
+  XLSX.writeFile(
+    workbook,
+    `calificaciones_individuales_${(ctx.titulo || "tarea").replace(/[^\w-]+/g, "_")}.xlsx`,
   );
 }
